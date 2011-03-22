@@ -335,7 +335,7 @@ int main(int argc, char **argv) {
             bytes_read = 0;
             lseek(fd, mbr.partitions[i].lba_address*512, SEEK_SET);
             while(bytes_read < mbr.partitions[i].lba_size*512) {
-                int bytes_to_copy = 1024*1024*8;
+                int bytes_to_copy = 1024*1024*1;
                 if(bytes_read + bytes_to_copy > mbr.partitions[i].lba_size*512)
                     bytes_to_copy = mbr.partitions[i].lba_size*512 - bytes_read;
                 char buffer[bytes_to_copy];
