@@ -37,7 +37,7 @@ struct ebr {
     uint8_t code[446];
     struct part_entry partition;
     struct part_entry next_partition;
-    uint8_t reserved[31];
+    uint8_t reserved[32];
     uint8_t signature[2];
 } __attribute__((__packed__));
 
@@ -193,12 +193,31 @@ static int generate_mbr_ebr(int part_count, struct part_args *part,
 
     struct part_entry partitions[4];    /* 446 - 510 */
     for(i=0; i<4; i++) {
-        if(part[i].size) {
+        if(part[i].size || (part[i].type == 0x05)) {
             part[i].start = running_address;
 
             mbr->partitions[i].lba_address = part[i].start;
             mbr->partitions[i].lba_size    = part[i].size;
             mbr->partitions[i].type        = part[i].type;
+
+            if (mbr->partitions[i].type == 0x05)
+            {
+              int m, n;
+              n = 0;
+              for(m=4; m<64; m++)
+              {
+                if (part[m].size)
+                  n += part[m].size + 0x20;
+              }
+
+              if (n)
+              {
+                mbr->partitions[i].lba_size = part[4].size + 0x20;
+
+                //ebr is the last parition im mbr, a must...
+                break;
+              }
+            }
 
             running_address += part[i].size;
         }
@@ -209,14 +228,25 @@ static int generate_mbr_ebr(int part_count, struct part_args *part,
     part += 4;
     for(i=0; i<60; i++) {
         if(part[i].size) {
+            bzero(&ebr[i], sizeof(struct ebr));
+            ebr[i].signature[0]           = 0x55;
+            ebr[i].signature[1]           = 0xAA;
+
             part[i].start = running_address;
 
-            ebr[i].partition.lba_address = part[i].start+0x20;
+            ebr[i].partition.lba_address = 0x20;
             ebr[i].partition.lba_size    = part[i].size;
             ebr[i].partition.type         = part[i].type;
 
-            running_address += part[i].size;
-        }
+            running_address += part[i].size + 0x20;
+
+            if (part[i+1].size) {
+              ebr[i].next_partition.lba_address = part[i].size + 0x20;
+              ebr[i].next_partition.lba_size    = part[i+1].size + 0x20;
+              ebr[i].next_partition.type         = 0x05;
+            }
+        } else
+          break;
     }
     return 0;
 }
@@ -307,7 +337,8 @@ int main(int argc, char **argv) {
         if(mbr.partitions[i].type == 0x05) {
             has_ebr = 1;
             mbr_ebr_index = i;
-            continue;
+
+            break; //ebr is the last partition in mbr
         }
         if(mbr.partitions[i].lba_address && mbr.partitions[i].lba_size) {
             char temp_name[512];
@@ -351,13 +382,14 @@ int main(int argc, char **argv) {
     if(has_ebr) {
         uint64_t ebr_offset = mbr.partitions[mbr_ebr_index].lba_address*512;
         i = 0;
-        while(1) {
+        while(ebr[i].partition.lba_size) {
             char temp_name[512];
             uint64_t bytes_read;
             char buffer[512];
             int part_fd;
 
-
+            fprintf(stderr, "Extended Partition %d offset: %d %d\n", i,
+                    ebr_offset, ebr_offset / 512);
             fprintf(stderr, "Extended Partition %d type: 0x%02x\n", i,
                     ebr[i].partition.type);
             fprintf(stderr, "Extended Partition %d start: %d\n", i,
@@ -366,28 +398,36 @@ int main(int argc, char **argv) {
                     ebr[i].partition.lba_size);
 
 
-            /*
-            snprintf(temp_name, sizeof(temp_name)-1, "%s%d", prefix, i+1+4);
-            part_fd = open(temp_name, O_WRONLY | O_CREAT, 0755);
+            lseek(fd, ebr_offset, SEEK_SET);
+            write(fd, &ebr[i], sizeof(struct ebr));
+
+            part_fd = open(part_args[i + 4].file, O_RDONLY);
             if(part_fd < 0) {
-                perror("Unable to open file for writing");
+                char tmp[512];
+                snprintf(tmp,
+                        sizeof(tmp),
+                        "Unable to open '%s' for reading",
+                        part_args[i].file);
+                perror(tmp);
                 return 1;
             }
 
             bytes_read = 0;
-            ebr_offset += ebr[i].partition.lba_address*512;
-            lseek(fd, ebr_offset, SEEK_SET);
-            while(bytes_read < ebr[i].partition.lba_size*512) {
-                read(part_fd, buffer, sizeof(buffer));
-                write(fd, buffer, sizeof(buffer));
-                bytes_read += sizeof(buffer);
+            lseek(fd, ebr_offset + (0x20 * 512), SEEK_SET);
+            int m = (ebr[i].partition.lba_size - 0x20) * 512;
+            while(bytes_read < m) {
+                int bytes_to_copy = 1024*1024*1;
+                if(bytes_read + bytes_to_copy > m)
+                    bytes_to_copy = m - bytes_read;
+                char buffer[bytes_to_copy];
+
+                read(part_fd, buffer, bytes_to_copy);
+                write(fd, buffer, bytes_to_copy);
+                bytes_read += bytes_to_copy;
             }
             close(part_fd);
-            */
 
-
-            if(!ebr[i].next_partition.lba_size && !ebr[i].next_partition.lba_address)
-                break;
+            ebr_offset += ebr[i].next_partition.lba_address*512;
             i++;
         }
     }
