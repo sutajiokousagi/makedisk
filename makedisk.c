@@ -9,6 +9,7 @@ struct part_args {
     uint32_t start;
     uint32_t size;
     uint32_t type;
+    uint32_t padding_pre; /* How much space to leave before the partition */
     char *file;
 };
 
@@ -90,8 +91,9 @@ int read_ebr(int fd, struct mbr *mbr, struct ebr *ebr, int ebr_records) {
 
 static void print_help(char *cmd) {
     fprintf(stderr,
-"Usage: %s -a first_partition -a second_partition ... -o output_file\n"
+"Usage: %s [-p padding] -a first_partition -a second_partition ... -o output_file\n"
 "\n"
+"    To add padding to the beginning of the first partition, use the 'p' option.\n"
 "    A partition definition follows the form of size:type:filename\n"
 "\n"
 "    The \"size\" parameter is in bytes, and supports 'B', 'M', 'K', and 'G' suffixes.\n"
@@ -101,20 +103,8 @@ static void print_help(char *cmd) {
 cmd);
 }
 
-static int process_partition(char *txt, struct part_args *part) {
-    char *ptr = txt;
-    char tmp[512];
-    int multiplier;
-
-    /* Locate the "length" record */
-    for(; *ptr && *ptr != ':'; ptr++);
-    if(!*ptr) {
-        fprintf(stderr, "Record length not found.\n");
-        return 1;
-    }
-    bzero(tmp, sizeof(tmp));
-    strncpy(tmp, txt, ptr-txt);
-    multiplier = 1;
+static uint32_t parse_multiplier(char *tmp) {
+    int multiplier = 1;
     if(tmp[strlen(tmp)-1] == 'K' || tmp[strlen(tmp)-1] == 'k') {
         multiplier = 1024;
         tmp[strlen(tmp)-1] = '\0';
@@ -131,7 +121,22 @@ static int process_partition(char *txt, struct part_args *part) {
         multiplier = 512;
         tmp[strlen(tmp)-1] = '\0';
     }
-    part->size = strtol(tmp, NULL, 0) * multiplier / 512;
+    return strtoul(tmp, NULL, 0) * multiplier / 512;
+}
+
+static int process_partition(char *txt, struct part_args *part) {
+    char *ptr = txt;
+    char tmp[512];
+
+    /* Locate the "length" record */
+    for(; *ptr && *ptr != ':'; ptr++);
+    if(!*ptr) {
+        fprintf(stderr, "Record length not found.\n");
+        return 1;
+    }
+    bzero(tmp, sizeof(tmp));
+    strncpy(tmp, txt, ptr-txt);
+    part->size = parse_multiplier(tmp);
     ptr++;
     txt = ptr;
 
@@ -191,9 +196,9 @@ static int generate_mbr_ebr(int part_count, struct part_args *part,
     mbr->partitions[0].status   = 0x80;
 
 
-    struct part_entry partitions[4];    /* 446 - 510 */
     for(i=0; i<4; i++) {
         if(part[i].size || (part[i].type == 0x05)) {
+            running_address += part[i].padding_pre;
             part[i].start = running_address;
 
             mbr->partitions[i].lba_address = part[i].start;
@@ -280,8 +285,10 @@ int main(int argc, char **argv) {
         if(!strcmp(argv[0], "-o")) {
             argv++;
             argc--;
+            printf("Setting outfile to [%s]\n", argv[0]);
             outfile = argv[0];
         }
+
         else if(!strcmp(argv[0], "-a")) {
             argv++;
             argc--;
@@ -292,7 +299,13 @@ int main(int argc, char **argv) {
                 return 1;
             }
         }
-        //if(argc <= 1 || *argv[0] != '-') {
+
+        else if (!strcmp(argv[0], "-p")) {
+            argv++;
+            argc--;
+            part_args[part_count].padding_pre = parse_multiplier(argv[0]);
+        }
+
         else {
             fprintf(stderr, "Argument %s not recognized.\n", argv[0]);
             print_help(cmd);
@@ -306,6 +319,7 @@ int main(int argc, char **argv) {
 
     /* Ensure a file was specified on the command line */
     if(!outfile) {
+        fprintf(stderr, "No output file specified\n");
         print_help(cmd);
         return 1;
     }
@@ -341,9 +355,7 @@ int main(int argc, char **argv) {
             break; //ebr is the last partition in mbr
         }
         if(mbr.partitions[i].lba_address && mbr.partitions[i].lba_size) {
-            char temp_name[512];
             uint64_t bytes_read;
-            char buffer[512];
             int part_fd;
 
 
@@ -383,9 +395,7 @@ int main(int argc, char **argv) {
         uint64_t ebr_offset = mbr.partitions[mbr_ebr_index].lba_address*512;
         i = 0;
         while(ebr[i].partition.lba_size) {
-            char temp_name[512];
             uint64_t bytes_read;
-            char buffer[512];
             int part_fd;
 
             fprintf(stderr, "Extended Partition %d offset: %d %d\n", i,
